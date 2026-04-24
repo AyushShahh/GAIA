@@ -9,3 +9,6 @@ Ask a question and it will provide you an answer using these tools:
 - file reader
 
 Qwen3 model is used with thinking mode on. You can use any LLM you want. Read more about this agent [here](https://www.linkedin.com/posts/ayushshahhh_built-the-first-version-of-my-ai-agent-for-activity-7337124208495198208-R38Y).
+
+### Update
+Added memory and a RAG tool to work with files and documents!
