@@ -3,8 +3,6 @@ load_dotenv()
 
 import os
 from tavily import TavilyClient
-from pytubefix import YouTube
-from pytubefix.cli import on_progress
 from langchain_community.document_loaders import WikipediaLoader
 from langchain_core.tools import tool
 from langchain_community.document_loaders import ArxivLoader
@@ -12,6 +10,10 @@ import whisper
 import contextlib
 import io
 import pandas as pd
+from langchain_community.vectorstores import Chroma
+from langchain_ollama import OllamaEmbeddings
+from langchain_community.document_loaders import PyPDFLoader, TextLoader, UnstructuredWordDocumentLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 
 @tool
@@ -23,8 +25,14 @@ def search_wikipedia(query: str) -> str:
     Args:
         query (str): The search query.
     """
-    docs = WikipediaLoader(query=query, load_max_docs=1).load()[0]
-    return f"Title: {docs.metadata['title']}, Source: {docs.metadata['source']}\n{docs.page_content}"
+    try:
+        results = WikipediaLoader(query=query, load_max_docs=1).load()
+        if not results:
+            return "No results found on Wikipedia."
+        docs = results[0]
+        return f"Title: {docs.metadata['title']}, Source: {docs.metadata['source']}\n{docs.page_content}"
+    except Exception as e:
+        return f"An error occurred while searching Wikipedia: {e}"
 
 @tool
 def web_search(query: str) -> str:
@@ -36,15 +44,20 @@ def web_search(query: str) -> str:
     Args:
         query (str): The search query.
     """
-    client = TavilyClient(os.getenv("TAVILY_API_KEY"))
-    docs = client.search(query=query, max_results=2, search_depth="advanced")['results']
-    formatted_docs = "\n\n---\n\n".join(
-        [
-            f"Title: {doc['title']}, Source: {doc['url']}\n{doc['content']}"
-            for doc in docs
-        ]
-    )
-    return formatted_docs
+    try:
+        client = TavilyClient(os.getenv("TAVILY_API_KEY"))
+        docs = client.search(query=query, max_results=2, search_depth="advanced")['results']
+        if not docs:
+            return "No web results found."
+        formatted_docs = "\n\n---\n\n".join(
+            [
+                f"Title: {doc['title']}, Source: {doc['url']}\n{doc['content']}"
+                for doc in docs
+            ]
+        )
+        return formatted_docs
+    except Exception as e:
+        return f"An error occurred during web search: {e}"
 
 @tool
 def arxiv_search(query: str, summary: bool) -> str:
@@ -57,16 +70,21 @@ def arxiv_search(query: str, summary: bool) -> str:
         query (str): The search query.
         summary (bool): Whether to include the summary of each document or the whole document.
     """
-    docs = ArxivLoader(query=query, load_max_docs=3).load()
-    formatted_docs = "\n\n---\n\n".join(
-        [
-            f"""Title: {doc.metadata['Title']}, Published: {doc.metadata['Published']}\n
-                {"Summary:" if summary else "Content:"}\n
-                {doc.metadata['Summary'] if summary else doc.page_content}"""
-            for doc in docs
-        ]
-    )
-    return formatted_docs
+    try:
+        docs = ArxivLoader(query=query, load_max_docs=3).load()
+        if not docs:
+            return "No Arxiv results found."
+        formatted_docs = "\n\n---\n\n".join(
+            [
+                f"""Title: {doc.metadata['Title']}, Published: {doc.metadata['Published']}\n
+                    {"Summary:" if summary else "Content:"}\n
+                    {doc.metadata['Summary'] if summary else doc.page_content}"""
+                for doc in docs
+            ]
+        )
+        return formatted_docs
+    except Exception as e:
+        return f"An error occurred during Arxiv search: {e}"
 
 @tool
 def transcribe_audio(file_name: str) -> str:
@@ -88,11 +106,52 @@ def read_file(file_name: str) -> str:
         file_name (str): Path to the file.
     """
     try:
-        with open(os.path.join(os.getcwd(), "files", file_name), "r") as file:
+        with open(os.path.join(os.getcwd(), "files", file_name), "r", encoding="utf-8") as file:
             return file.read()
+    except UnicodeDecodeError:
+        return f"Error: Cannot read {file_name} as text. It might be a binary file. Try using rag_document_search if it's a PDF."
     except Exception as e:
         return f"An error occurred while reading the file: {e}"
+
+@tool
+def rag_document_search(file_name: str, query: str) -> str:
+    """
+    Load a document (PDF, Text, Word), chunk it, embed the contents, and search for the most relevant sections based on a query.
+    Extremely useful for asking questions about long documents.
+    Args:
+        file_name (str): Path to the file (within the 'files' directory).
+        query (str): The question or query to search for within the document.
+    """
+    file_path = os.path.join(os.getcwd(), "files", file_name)
+    if not os.path.exists(file_path):
+        return f"Error: File {file_name} not found."
     
+    try:
+        if file_name.endswith('.pdf'):
+            loader = PyPDFLoader(file_path)
+        elif file_name.endswith('.docx') or file_name.endswith('.doc'):
+            loader = UnstructuredWordDocumentLoader(file_path)
+        else:
+            loader = TextLoader(file_path, encoding='utf-8')
+            
+        docs = loader.load()
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+        splits = text_splitter.split_documents(docs)
+        
+        embeddings = OllamaEmbeddings(model="nomic-embed-text-v2-moe")
+        vectorstore = Chroma.from_documents(documents=splits, embedding=embeddings)
+        
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
+        retrieved_docs = retriever.invoke(query)
+        
+        if not retrieved_docs:
+            return "No relevant information found in the document."
+            
+        content = "\n\n---\n\n".join([doc.page_content for doc in retrieved_docs])
+        return f"Retrieved Context from {file_name}:\n{content}"
+    except Exception as e:
+        return f"Error processing document: {e}"
+
 @tool
 def transcribe_youtube_audio(youtube_video_url: str) -> str:
     """
