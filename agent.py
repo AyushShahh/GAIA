@@ -1,8 +1,9 @@
 from dotenv import load_dotenv
 load_dotenv()
-from tools import search_wikipedia, web_search, arxiv_search, transcribe_audio, code_interpreter, read_file, transcribe_youtube_audio, inspect_spreadsheet
+from tools import search_wikipedia, web_search, arxiv_search, transcribe_audio, code_interpreter, read_file, transcribe_youtube_audio, inspect_spreadsheet, rag_document_search
 
 from langgraph.prebuilt import create_react_agent
+from langgraph.checkpoint.memory import MemorySaver
 from langchain_ollama import ChatOllama
 
 
@@ -31,32 +32,13 @@ When a question is asked:
 - Files are available to use only if they are provided at the end of the question.
 - Note that you can only work with audio files and spreadsheets, or code snippets that you can run, if they are provided in the question or as files.
 - If you need to read a file, use the read_file tool to extract its content. This tool should also be used to read python files before executing them with the code_interpreter tool.
+- For asking questions about contents of PDF, Word, or other text documents, use the rag_document_search tool to find relevant context.
 - You can work with transcribe_youtube_audio only if the answer requires audio transcription from a YouTube video for e.g. to know what has been said or to extract information from the audio content.
 - If the question requires information from a youtube video that involves video/image processing, do not use the transcribe_youtube_audio and instead use the web_search tool with a query that includes the video link and relevant keywords that guarantees the answers.
 - You cannot work with images, hence assume and/or guess the answer using strong reasoning or use tools like web_search that can help you find the answer.
 
-If you cannot answer definitively, state your uncertainty in reasoning but still give the most probable FINAL ANSWER.
+If you cannot answer definitively, state your uncertainty in reasoning but still give the most probable answer.
 Be rigorous, concise, and systematic in your approach.
-"""
-
-FINAL_ANSWER_GUIDELINES = """
-- You DO NOT need to repeat the question or the response in your final answer.
-- The output must strictly be formatted as: FINAL ANSWER: [your answer]
-- The final answer must be as short as possible: a single number, word, or comma-separated list.
-- If asked for a number: do NOT use commas or units/symbols (e.g., $, %, etc.) unless explicitly told to.
-- If asked for a string: do NOT use articles (a, the), abbreviations (like in city names, etc), or digits written in full plain text unless told otherwise.
-- Always expand abbreviations to their full form unless explicitly told not to.
-- If asked for a list: return a comma-separated list using the above rules.
-- You must always obey the formatting specified in the question with the above rules.
-- Do NOT provide any explanation, reasoning, or extra text after the FINAL ANSWER line.
-
-Examples:
-Question: What is the capital of France?
-FINAL ANSWER: Paris
-Question: What is the population of France in millions rounded to the nearest integer?
-FINAL ANSWER: 69
-Question: Name the three largest countries by area, sorted alphabetically.
-FINAL ANSWER: canada, china, russia
 """
 
 tools = [
@@ -67,7 +49,8 @@ tools = [
     code_interpreter,
     read_file,
     transcribe_youtube_audio,
-    inspect_spreadsheet
+    inspect_spreadsheet,
+    rag_document_search
 ]
 
 class GAIAAgent:
@@ -75,34 +58,32 @@ class GAIAAgent:
         self.llm = ChatOllama(model="qwen3:8b")
         self.tools = tools
         self.system_prompt = SYSTEM_PROMPT
+        self.memory = MemorySaver()
         self.reactagent = create_react_agent(
             model=self.llm,
             tools=self.tools,
             prompt=self.system_prompt,
+            checkpointer=self.memory,
             debug=debug
         )
 
-    def __call__(self, question, file_name=None):
-        self.response = self.reactagent.invoke(
-            {
-                "messages": f"{question}\nFile name: {file_name}" if file_name else question,
-            }
-        )['messages'][-1].content.split("</think>")[1].strip()
+    def __call__(self, question, file_name=None, thread_id="default"):
+        config = {"configurable": {"thread_id": thread_id}}
+        
+        messages = f"{question}\nFile name: {file_name}" if file_name else question
+        
+        response = self.reactagent.invoke(
+            {"messages": messages},
+            config=config
+        )['messages'][-1].content
+        
+        # Determine if we should split by </think> based on model output style, but avoid crashing if it's absent
+        if "</think>" in response:
+            self.response = response.split("</think>")[-1].strip()
+        else:
+            self.response = response.strip()
 
         print(f"Response: {self.response}")
-
-        self.final_answer = self.llm.invoke([
-            ("system", 
-                "You are a highly skilled formatting assistant that formats the final answer from the un-formatted response to the question. "
-                "Do not start reasoning or solving the question again. "
-                "The response already contains the agent's reasoning and answer to the question, your task is to JUST FORMAT the FINAL ANSWER. "
-                "Please format the FINAL ANSWER from the response as STRICTLY specified by the guidelines below:\n"
-                f"{FINAL_ANSWER_GUIDELINES}"
-            ),
-            ("human", f"Question: {question}\nResponse: {self.response}")
-        ]).content.split("FINAL ANSWER:")[-1].strip()
-
-        return self.final_answer
-        # return self.response
+        return self.response
     
 agent = GAIAAgent(debug=True)
